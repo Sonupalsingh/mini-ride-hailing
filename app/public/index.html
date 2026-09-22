@@ -45,6 +45,15 @@
   .stat .lbl { font-size: 12px; color: #666; margin-top: 2px; }
   .history-item { border-bottom: 1px solid #eee; padding: 8px 0; font-size: 13px; display: flex; justify-content: space-between; }
   .history-item:last-child { border-bottom: none; }
+  .chat-box { border: 1px solid #ddd; border-radius: 10px; padding: 12px; margin-top: 12px; }
+  .chat-box h4 { margin: 0 0 8px; font-size: 14px; }
+  .chat-messages { height: 160px; overflow-y: auto; border: 1px solid #eee; border-radius: 6px; padding: 8px; background: #fafafa; font-size: 13px; }
+  .chat-msg { margin-bottom: 6px; }
+  .chat-msg.mine { text-align: right; color: #1d4ed8; }
+  .chat-msg.theirs { text-align: left; color: #333; }
+  .chat-row { display: flex; gap: 6px; margin-top: 8px; }
+  .chat-row input { flex: 1; margin-top: 0; }
+  .chat-row button { padding: 8px 14px; background: #2563eb; color: white; border: none; border-radius: 6px; cursor: pointer; }
 </style>
 </head>
 <body>
@@ -66,6 +75,7 @@
   <button class="action" onclick="requestRide()">Request ride</button>
 
   <div id="rider-current"></div>
+  <div id="rider-chat-panel"></div>
 
   <h3>My rides <span id="rider-total-booked" style="font-weight:normal;color:#666;font-size:14px"></span></h3>
   <div id="rider-history"></div>
@@ -88,6 +98,7 @@
 
   <h3>Your active ride</h3>
   <div id="driver-current"></div>
+  <div id="driver-chat-panel"></div>
 </div>
 
 <script src="/socket.io/socket.io.js"></script>
@@ -113,6 +124,11 @@
   }
   const riderId = getOrCreateId("mini-ride-rider-id", "rider");
   const driverId = getOrCreateId("mini-ride-driver-id", "driver");
+
+  // Track which ride's chat is currently open on each side, so incoming
+  // chat:message events (scoped by rideId) know where to render.
+  let riderChatRideId = null;
+  let driverChatRideId = null;
 
   function showTab(which) {
     document.getElementById("tab-rider").classList.toggle("active", which === "rider");
@@ -178,6 +194,58 @@
         </div>
       </div>`;
   }
+
+  // ---- In-ride chat ----
+
+  function renderChatPanel(containerId, rideId, myRole, myName) {
+    document.getElementById(containerId).innerHTML = `
+      <div class="chat-box">
+        <h4>Chat with ${myRole === "rider" ? "driver" : "rider"}</h4>
+        <div class="chat-messages" id="${containerId}-messages"></div>
+        <div class="chat-row">
+          <input id="${containerId}-input" placeholder="Type a message..." onkeydown="if(event.key==='Enter') sendChat('${containerId}','${rideId}','${myRole}')" />
+          <button onclick="sendChat('${containerId}','${rideId}','${myRole}')">Send</button>
+        </div>
+      </div>`;
+    socket.emit("chat:join", { rideId });
+    if (myRole === "rider") riderChatRideId = rideId;
+    else driverChatRideId = rideId;
+  }
+
+  function closeChatPanel(containerId, myRole) {
+    document.getElementById(containerId).innerHTML = "";
+    if (myRole === "rider") riderChatRideId = null;
+    else driverChatRideId = null;
+  }
+
+  function appendChatMessage(containerId, msg, myRole) {
+    const el = document.getElementById(`${containerId}-messages`);
+    if (!el) return;
+    const mine = msg.senderRole === myRole;
+    const div = document.createElement("div");
+    div.className = `chat-msg ${mine ? "mine" : "theirs"}`;
+    div.innerHTML = `<b>${msg.senderName}:</b> `;
+    div.appendChild(document.createTextNode(msg.text));
+    el.appendChild(div);
+    el.scrollTop = el.scrollHeight;
+  }
+
+  function sendChat(containerId, rideId, myRole) {
+    const input = document.getElementById(`${containerId}-input`);
+    const text = input.value;
+    if (!text || !text.trim()) return;
+    const myName =
+      myRole === "rider"
+        ? document.getElementById("rider-name").value
+        : document.getElementById("driver-name").value;
+    socket.emit("chat:send", { rideId, senderRole: myRole, senderName: myName, text });
+    input.value = "";
+  }
+
+  socket.on("chat:message", (msg) => {
+    if (msg.rideId === riderChatRideId) appendChatMessage("rider-chat-panel", msg, "rider");
+    if (msg.rideId === driverChatRideId) appendChatMessage("driver-chat-panel", msg, "driver");
+  });
 
   function downloadBill(rideId) {
     const ride = knownRides.get(rideId);
@@ -293,6 +361,9 @@
     const ride = await res.json();
     if (ride) {
       document.getElementById("rider-current").innerHTML = rideCard(ride, "", true);
+      if (ride.status === "accepted") {
+        renderChatPanel("rider-chat-panel", ride.id, "rider");
+      }
     }
   })();
   refreshRiderHistory();
@@ -317,14 +388,17 @@
 
   socket.on("ride:accepted", (ride) => {
     document.getElementById("rider-current").innerHTML = rideCard(ride, "", true);
+    renderChatPanel("rider-chat-panel", ride.id, "rider");
     refreshRiderHistory();
   });
   socket.on("ride:completed", (ride) => {
     document.getElementById("rider-current").innerHTML = billCard(ride);
+    closeChatPanel("rider-chat-panel", "rider");
     refreshRiderHistory();
   });
   socket.on("ride:cancelled", (ride) => {
     document.getElementById("rider-current").innerHTML = rideCard(ride, "", false);
+    closeChatPanel("rider-chat-panel", "rider");
     refreshRiderHistory();
   });
 
@@ -358,6 +432,7 @@
         `<button onclick="completeRide('${ride.id}')">Complete ride</button>
          <button class="cancel" onclick="driverCancelRide('${ride.id}')">Cancel ride</button>`
       );
+      renderChatPanel("driver-chat-panel", ride.id, "driver");
     }
   })();
   refreshDriverStats();
@@ -384,6 +459,7 @@
       `<button onclick="completeRide('${ride.id}')">Complete ride</button>
        <button class="cancel" onclick="driverCancelRide('${ride.id}')">Cancel ride</button>`
     );
+    renderChatPanel("driver-chat-panel", ride.id, "driver");
     refreshDriverStats();
   });
 
@@ -393,12 +469,14 @@
     const panel = document.getElementById("driver-current");
     if (panel.innerHTML.includes(ride.id)) {
       panel.innerHTML = `<p>Ride cancelled${ride.cancelledBy === "rider" ? " by the rider" : ""}.</p>`;
+      closeChatPanel("driver-chat-panel", "driver");
       refreshDriverStats();
     }
   });
 
   socket.on("ride:completed", (ride) => {
     document.getElementById("driver-current").innerHTML = billCard(ride);
+    closeChatPanel("driver-chat-panel", "driver");
     refreshDriverStats();
   });
 

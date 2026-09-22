@@ -80,6 +80,14 @@ async function startKafka() {
     eachMessage: async ({ message }) => {
       if (!message.value) return;
       const event = JSON.parse(message.value.toString());
+
+      // Chat messages have a different shape (no ride-state mutation) —
+      // handle them separately before touching the rides map.
+      if (event.type === "MESSAGE") {
+        io.to(`ride-chat-${event.rideId}`).emit("chat:message", event.message);
+        return;
+      }
+
       const { type, ride } = event;
 
       // Keep this instance's own in-memory view in sync with the event
@@ -296,6 +304,42 @@ io.on("connection", (socket) => {
   // about their own ride specifically.
   socket.on("rider:watch", ({ riderId }) => {
     socket.join(`rider-${riderId}`);
+  });
+
+  // ---- In-ride chat (only meaningful while a ride is "accepted") ----
+
+  // Either side joins the chat room for a specific ride, once it's been
+  // accepted, so they can see each other's messages.
+  socket.on("chat:join", ({ rideId }) => {
+    socket.join(`ride-chat-${rideId}`);
+  });
+
+  socket.on("chat:send", async ({ rideId, senderRole, senderName, text }) => {
+    if (!rideId || !senderName || !text || !text.trim()) return;
+    const ride = rides.get(rideId);
+    // Chat is only allowed while the ride is actually matched and in
+    // progress — not before a driver has accepted, and not after the
+    // ride is completed or cancelled.
+    if (!ride || ride.status !== "accepted") return;
+
+    const chatMessage = {
+      id: crypto.randomUUID(),
+      rideId,
+      senderRole, // "rider" or "driver"
+      senderName,
+      text: text.trim().slice(0, 500),
+      at: new Date().toISOString(),
+    };
+
+    await producer.send({
+      topic: TOPIC,
+      messages: [
+        {
+          key: rideId, // same partition/order as this ride's other events
+          value: JSON.stringify({ type: "MESSAGE", rideId, message: chatMessage }),
+        },
+      ],
+    });
   });
 });
 
