@@ -1,0 +1,27 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: create-ride-topic
+  namespace: ride-hailing
+spec:
+  backoffLimit: 6
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: create-topic
+          image: docker.io/confluentinc/cp-kafka:7.6.0
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for Kafka to be ready..."
+              until kafka-broker-api-versions --bootstrap-server kafka:9092 > /dev/null 2>&1; do
+                sleep 5
+              done
+              kafka-topics --bootstrap-server kafka:9092 \
+                --create --if-not-exists \
+                --topic ride-events \
+                --partitions 3 \
+                --replication-factor 1
+              kafka-topics --bootstrap-server kafka:9092 --list

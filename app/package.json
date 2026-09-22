@@ -1,0 +1,14 @@
+{
+  "name": "mini-ride-hailing",
+  "version": "1.0.0",
+  "description": "Mini Uber/Ola-style ride-hailing demo on Kafka + Zookeeper",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "kafkajs": "^2.2.4",
+    "socket.io": "^4.7.5"
+  }
+}

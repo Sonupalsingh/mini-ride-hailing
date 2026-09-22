@@ -1,0 +1,97 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ride-app
+  namespace: ride-hailing
+  labels:
+    app: ride-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ride-app
+  template:
+    metadata:
+      labels:
+        app: ride-app
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: ride-app
+          # Build & load this from app/Dockerfile before deploying:
+          #   docker build -t mini-ride-app:1.0 app/
+          #   (then import into your cluster's runtime — see
+          #    setup-prerequisites.sh output, or the README's
+          #    "Build the ride-app image" section)
+          image: mini-ride-app:1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3000
+          env:
+            - name: KAFKA_BROKER
+              value: "kafka:9092"
+            - name: KAFKA_TOPIC
+              value: "ride-events"
+            - name: PORT
+              value: "3000"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ride-app
+  namespace: ride-hailing
+spec:
+  type: ClusterIP
+  # Sticky sessions: Socket.IO's handshake needs every request from the
+  # same client to land on the same pod. Without this, Kubernetes'
+  # default random per-connection load balancing can split a single
+  # client's handshake across pods, breaking the connection.
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 10800
+  selector:
+    app: ride-app
+  ports:
+    - port: 80
+      targetPort: 3000
+---
+# Exposes the app outside the cluster (accessible from any machine that
+# can reach the node's IP, e.g. http://<node-ip>:30081).
+# For real use, prefer an Ingress with TLS instead of NodePort.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ride-app-nodeport
+  namespace: ride-hailing
+spec:
+  type: NodePort
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 10800
+  selector:
+    app: ride-app
+  ports:
+    - port: 80
+      targetPort: 3000
+      nodePort: 30081

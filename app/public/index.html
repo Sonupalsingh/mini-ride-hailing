@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Mini Uber/Ola — Kafka demo</title>
+<style>
+  body { font-family: sans-serif; max-width: 640px; margin: 30px auto; padding: 0 16px; }
+  h2 { margin-bottom: 4px; }
+  .sub { color: #666; margin-top: 0; font-size: 14px; }
+  .tabs { display: flex; gap: 8px; margin: 16px 0; }
+  .tabs button { flex: 1; padding: 10px; cursor: pointer; border: 1px solid #ccc; background: #f5f5f5; border-radius: 6px; }
+  .tabs button.active { background: #2563eb; color: white; border-color: #2563eb; }
+  .view { display: none; }
+  .view.active { display: block; }
+  label { display: block; margin-top: 10px; font-size: 13px; color: #444; }
+  input { width: 100%; padding: 8px; box-sizing: border-box; margin-top: 4px; }
+  button.action { margin-top: 12px; padding: 10px 16px; background: #2563eb; color: white; border: none; border-radius: 6px; cursor: pointer; }
+  button.action:hover { background: #1d4ed8; }
+  .card { border: 1px solid #ddd; border-radius: 8px; padding: 12px; margin-top: 12px; }
+  .card .fare { font-weight: bold; color: #16a34a; }
+  .status { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; font-weight: bold; }
+  .status.requested { background: #fef3c7; color: #92400e; }
+  .status.accepted { background: #dbeafe; color: #1e40af; }
+  .status.completed { background: #dcfce7; color: #166534; }
+  .status.cancelled { background: #fee2e2; color: #991b1b; }
+  .ride-list .card button { margin-top: 8px; }
+  #open-rides .card { border-color: #93c5fd; }
+  button.cancel { background: #fff; color: #dc2626; border: 1px solid #dc2626; padding: 8px 14px; border-radius: 6px; cursor: pointer; margin-left: 8px; }
+  button.cancel:hover { background: #fef2f2; }
+  .bill { border: 1px solid #ddd; border-radius: 10px; padding: 16px; margin-top: 12px; background: #fafafa; }
+  .bill h3 { margin: 0 0 4px; }
+  .bill .ride-id { font-size: 12px; color: #888; margin-bottom: 12px; }
+  .bill table { width: 100%; border-collapse: collapse; font-size: 14px; margin: 10px 0; }
+  .bill table td { padding: 4px 0; }
+  .bill table td:last-child { text-align: right; }
+  .bill .total-row td { border-top: 1px solid #ccc; padding-top: 8px; font-weight: bold; font-size: 16px; color: #16a34a; }
+  .bill .helpline { margin-top: 14px; padding: 10px; background: #eff6ff; border-radius: 6px; font-size: 13px; }
+  .bill .btn-row { margin-top: 14px; display: flex; gap: 8px; }
+  button.download { background: #16a34a; color: white; border: none; padding: 10px 16px; border-radius: 6px; cursor: pointer; }
+  button.download:hover { background: #15803d; }
+  .stats-box { display: flex; gap: 10px; margin-top: 10px; }
+  .stat { flex: 1; border: 1px solid #ddd; border-radius: 8px; padding: 12px; text-align: center; background: #fafafa; }
+  .stat .num { font-size: 22px; font-weight: bold; color: #2563eb; }
+  .stat.earnings .num { color: #16a34a; }
+  .stat .lbl { font-size: 12px; color: #666; margin-top: 2px; }
+  .history-item { border-bottom: 1px solid #eee; padding: 8px 0; font-size: 13px; display: flex; justify-content: space-between; }
+  .history-item:last-child { border-bottom: none; }
+</style>
+</head>
+<body>
+
+<h2>Mini Uber/Ola — Kafka demo</h2>
+<p class="sub">Ride requests, driver matching and status updates, all flowing through Kafka</p>
+
+<div class="tabs">
+  <button id="tab-rider" class="active" onclick="showTab('rider')">Rider</button>
+  <button id="tab-driver" onclick="showTab('driver')">Driver</button>
+</div>
+
+<!-- RIDER VIEW -->
+<div id="view-rider" class="view active">
+  <label>Your name <input id="rider-name" value="Rider1" /></label>
+  <label>Pickup <input id="rider-pickup" value="MG Road" /></label>
+  <label>Drop <input id="rider-drop" value="Airport" /></label>
+  <label>Distance (km) <input id="rider-distance" type="number" value="12" /></label>
+  <button class="action" onclick="requestRide()">Request ride</button>
+
+  <div id="rider-current"></div>
+
+  <h3>My rides <span id="rider-total-booked" style="font-weight:normal;color:#666;font-size:14px"></span></h3>
+  <div id="rider-history"></div>
+</div>
+
+<!-- DRIVER VIEW -->
+<div id="view-driver" class="view">
+  <label>Your name <input id="driver-name" value="Driver1" /></label>
+  <button class="action" onclick="goOnline()">Go online</button>
+
+  <h3>Today's stats</h3>
+  <div id="driver-stats" class="stats-box">
+    <div class="stat"><div class="num">0</div><div class="lbl">Accepted today</div></div>
+    <div class="stat"><div class="num">0</div><div class="lbl">Completed today</div></div>
+    <div class="stat earnings"><div class="num">₹0</div><div class="lbl">Earnings today</div></div>
+  </div>
+
+  <h3>Open ride requests</h3>
+  <div id="open-rides" class="ride-list"></div>
+
+  <h3>Your active ride</h3>
+  <div id="driver-current"></div>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+  const socket = io();
+
+  // Persist rider/driver IDs across a REFRESH of the same tab — but NOT
+  // across different tabs. sessionStorage (unlike localStorage) is
+  // scoped per browser tab: a page reload keeps the same ID, but opening
+  // a second tab gets its own independent ID. This matters here because
+  // testing "Driver 1" and "Driver 2" in two tabs of the same browser
+  // needs them to be genuinely different drivers — with localStorage,
+  // both tabs would share the exact same driverId (localStorage is
+  // shared across all tabs of one origin), making them the same driver
+  // as far as the server is concerned.
+  function getOrCreateId(key, prefix) {
+    let id = sessionStorage.getItem(key);
+    if (!id) {
+      id = prefix + "-" + Math.random().toString(36).slice(2, 8);
+      sessionStorage.setItem(key, id);
+    }
+    return id;
+  }
+  const riderId = getOrCreateId("mini-ride-rider-id", "rider");
+  const driverId = getOrCreateId("mini-ride-driver-id", "driver");
+
+  function showTab(which) {
+    document.getElementById("tab-rider").classList.toggle("active", which === "rider");
+    document.getElementById("tab-driver").classList.toggle("active", which === "driver");
+    document.getElementById("view-rider").classList.toggle("active", which === "rider");
+    document.getElementById("view-driver").classList.toggle("active", which === "driver");
+  }
+
+  const HELPLINE = "1800-123-4567";
+
+  function statusBadge(status) {
+    return `<span class="status ${status}">${status}</span>`;
+  }
+
+  // Keep the last-known full ride object for each ride we've touched, so
+  // the Download button can build a receipt without another network call.
+  const knownRides = new Map();
+  function remember(ride) {
+    knownRides.set(ride.id, ride);
+    return ride;
+  }
+
+  function rideCard(ride, extraButtons = "", allowCancel = false) {
+    remember(ride);
+    const canCancel = allowCancel && (ride.status === "requested" || ride.status === "accepted");
+    return `
+      <div class="card" data-ride-id="${ride.id}">
+        <div>${statusBadge(ride.status)}</div>
+        <div><b>${ride.pickup}</b> &rarr; <b>${ride.drop}</b> (${ride.distanceKm} km)</div>
+        <div class="fare">Fare: ₹${ride.fareEstimate}</div>
+        ${ride.driverName ? `<div>Driver: ${ride.driverName}</div>` : ""}
+        ${ride.riderName ? `<div>Rider: ${ride.riderName}</div>` : ""}
+        ${extraButtons}
+        ${canCancel ? `<button class="cancel" onclick="cancelRide('${ride.id}')">Cancel ride</button>` : ""}
+      </div>`;
+  }
+
+  // Full post-ride bill: fare breakdown, ride details, helpline, download.
+  function billCard(ride) {
+    remember(ride);
+    const fare = ride.finalFare ?? ride.fareEstimate;
+    const distanceCost = ride.perKmRate * ride.distanceKm;
+    return `
+      <div class="bill" data-ride-id="${ride.id}">
+        <h3>Ride receipt</h3>
+        <div class="ride-id">Ride ID: ${ride.id}</div>
+        <div>${statusBadge(ride.status)}</div>
+        <div style="margin-top:8px"><b>${ride.pickup}</b> &rarr; <b>${ride.drop}</b></div>
+        <div>Rider: ${ride.riderName} &nbsp;|&nbsp; Driver: ${ride.driverName}</div>
+        <table>
+          <tr><td>Base fare</td><td>₹${ride.baseFare}</td></tr>
+          <tr><td>Distance (${ride.distanceKm} km &times; ₹${ride.perKmRate}/km)</td><td>₹${distanceCost}</td></tr>
+          <tr class="total-row"><td>Total fare</td><td>₹${fare}</td></tr>
+        </table>
+        <div style="font-size:13px;color:#666">
+          Requested: ${new Date(ride.requestedAt).toLocaleString()}<br/>
+          ${ride.acceptedAt ? `Accepted: ${new Date(ride.acceptedAt).toLocaleString()}<br/>` : ""}
+          ${ride.completedAt ? `Completed: ${new Date(ride.completedAt).toLocaleString()}` : ""}
+        </div>
+        <div class="helpline">Need help with this ride? Call our helpline: <b>${HELPLINE}</b></div>
+        <div class="btn-row">
+          <button class="download" onclick="downloadBill('${ride.id}')">Download bill</button>
+        </div>
+      </div>`;
+  }
+
+  function downloadBill(rideId) {
+    const ride = knownRides.get(rideId);
+    if (!ride) return;
+    const fare = ride.finalFare ?? ride.fareEstimate;
+    const distanceCost = ride.perKmRate * ride.distanceKm;
+    const lines = [
+      "MINI UBER/OLA — RIDE RECEIPT",
+      "================================",
+      `Ride ID: ${ride.id}`,
+      `Status: ${ride.status}`,
+      "",
+      `Pickup: ${ride.pickup}`,
+      `Drop: ${ride.drop}`,
+      `Distance: ${ride.distanceKm} km`,
+      "",
+      `Rider: ${ride.riderName}`,
+      `Driver: ${ride.driverName || "-"}`,
+      "",
+      "FARE BREAKDOWN",
+      "--------------------------------",
+      `Base fare:            ₹${ride.baseFare}`,
+      `Distance (${ride.distanceKm} km x ₹${ride.perKmRate}/km): ₹${distanceCost}`,
+      `--------------------------------`,
+      `TOTAL:                 ₹${fare}`,
+      "",
+      `Requested at: ${new Date(ride.requestedAt).toLocaleString()}`,
+      ride.acceptedAt ? `Accepted at:  ${new Date(ride.acceptedAt).toLocaleString()}` : "",
+      ride.completedAt ? `Completed at: ${new Date(ride.completedAt).toLocaleString()}` : "",
+      "",
+      `Need help? Call our helpline: ${HELPLINE}`,
+    ].filter(Boolean).join("\n");
+
+    const blob = new Blob([lines], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `ride-receipt-${ride.id.slice(0, 8)}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  async function cancelRide(id) {
+    if (!confirm("Cancel this ride?")) return;
+    const res = await fetch(`/api/rides/${id}/cancel`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ riderId }),
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      alert("Could not cancel: " + err.error);
+    }
+  }
+
+  async function driverCancelRide(id) {
+    if (!confirm("Cancel this ride? The rider will be notified.")) return;
+    const res = await fetch(`/api/rides/${id}/cancel`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ driverId }),
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      alert("Could not cancel: " + err.error);
+    } else {
+      refreshDriverStats();
+    }
+  }
+
+  // ---- Rider ride history ----
+  async function refreshRiderHistory() {
+    const res = await fetch(`/api/rides/rider/${riderId}/history`);
+    const { totalBooked, rides: list } = await res.json();
+    document.getElementById("rider-total-booked").textContent = `(${totalBooked} booked so far)`;
+    const el = document.getElementById("rider-history");
+    if (list.length === 0) {
+      el.innerHTML = "<p style='color:#888;font-size:13px'>No rides yet.</p>";
+      return;
+    }
+    el.innerHTML = list
+      .map(
+        (r) => `
+        <div class="history-item">
+          <span>${statusBadge(r.status)} ${r.pickup} &rarr; ${r.drop} (${r.distanceKm} km)</span>
+          <span>₹${r.finalFare ?? r.fareEstimate}</span>
+        </div>`
+      )
+      .join("");
+  }
+
+  // ---- Driver stats ----
+  async function refreshDriverStats() {
+    const res = await fetch(`/api/rides/driver/${driverId}/stats`);
+    const { today } = await res.json();
+    const el = document.getElementById("driver-stats");
+    el.innerHTML = `
+      <div class="stat"><div class="num">${today.ridesAccepted}</div><div class="lbl">Accepted today</div></div>
+      <div class="stat"><div class="num">${today.ridesCompleted}</div><div class="lbl">Completed today</div></div>
+      <div class="stat earnings"><div class="num">₹${today.earnings}</div><div class="lbl">Earnings today</div></div>
+    `;
+  }
+
+  // ---- Rider side ----
+  socket.emit("rider:watch", { riderId });
+
+  // On load, check if this rider already has an active ride (survives
+  // a refresh of this tab, since riderId is now stable via sessionStorage).
+  (async function restoreRiderState() {
+    const res = await fetch(`/api/rides/rider/${riderId}/current`);
+    const ride = await res.json();
+    if (ride) {
+      document.getElementById("rider-current").innerHTML = rideCard(ride, "", true);
+    }
+  })();
+  refreshRiderHistory();
+
+  async function requestRide() {
+    const body = {
+      riderId,
+      riderName: document.getElementById("rider-name").value,
+      pickup: document.getElementById("rider-pickup").value,
+      drop: document.getElementById("rider-drop").value,
+      distanceKm: document.getElementById("rider-distance").value,
+    };
+    const res = await fetch("/api/rides", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const ride = await res.json();
+    document.getElementById("rider-current").innerHTML = rideCard(ride, "", true);
+    refreshRiderHistory();
+  }
+
+  socket.on("ride:accepted", (ride) => {
+    document.getElementById("rider-current").innerHTML = rideCard(ride, "", true);
+    refreshRiderHistory();
+  });
+  socket.on("ride:completed", (ride) => {
+    document.getElementById("rider-current").innerHTML = billCard(ride);
+    refreshRiderHistory();
+  });
+  socket.on("ride:cancelled", (ride) => {
+    document.getElementById("rider-current").innerHTML = rideCard(ride, "", false);
+    refreshRiderHistory();
+  });
+
+  // ---- Driver side ----
+  const openRides = new Map();
+
+  function renderOpenRides() {
+    const el = document.getElementById("open-rides");
+    if (openRides.size === 0) {
+      el.innerHTML = "<p>No open requests right now.</p>";
+      return;
+    }
+    el.innerHTML = [...openRides.values()]
+      .map((r) => rideCard(r, `<button onclick="acceptRide('${r.id}')">Accept</button>`))
+      .join("");
+  }
+
+  function goOnline() {
+    socket.emit("driver:online", { driverId });
+    refreshDriverStats();
+  }
+
+  // On load, check if this driver already has an active (accepted) ride
+  // in progress — survives a refresh now that driverId is stable.
+  (async function restoreDriverState() {
+    const res = await fetch(`/api/rides/driver/${driverId}/current`);
+    const ride = await res.json();
+    if (ride) {
+      document.getElementById("driver-current").innerHTML = rideCard(
+        ride,
+        `<button onclick="completeRide('${ride.id}')">Complete ride</button>
+         <button class="cancel" onclick="driverCancelRide('${ride.id}')">Cancel ride</button>`
+      );
+    }
+  })();
+  refreshDriverStats();
+
+  socket.on("ride:open-list", (list) => {
+    openRides.clear();
+    list.forEach((r) => openRides.set(r.id, r));
+    renderOpenRides();
+  });
+
+  socket.on("ride:new", (ride) => {
+    openRides.set(ride.id, ride);
+    renderOpenRides();
+  });
+
+  socket.on("ride:taken", ({ id }) => {
+    openRides.delete(id);
+    renderOpenRides();
+  });
+
+  socket.on("ride:confirmed", (ride) => {
+    document.getElementById("driver-current").innerHTML = rideCard(
+      ride,
+      `<button onclick="completeRide('${ride.id}')">Complete ride</button>
+       <button class="cancel" onclick="driverCancelRide('${ride.id}')">Cancel ride</button>`
+    );
+    refreshDriverStats();
+  });
+
+  // A ride this driver was on (or one they just cancelled themselves)
+  // got cancelled — clear it from "your active ride".
+  socket.on("ride:cancelled", (ride) => {
+    const panel = document.getElementById("driver-current");
+    if (panel.innerHTML.includes(ride.id)) {
+      panel.innerHTML = `<p>Ride cancelled${ride.cancelledBy === "rider" ? " by the rider" : ""}.</p>`;
+      refreshDriverStats();
+    }
+  });
+
+  socket.on("ride:completed", (ride) => {
+    document.getElementById("driver-current").innerHTML = billCard(ride);
+    refreshDriverStats();
+  });
+
+  async function acceptRide(id) {
+    const driverName = document.getElementById("driver-name").value;
+    const res = await fetch(`/api/rides/${id}/accept`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ driverId, driverName }),
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      alert("Could not accept: " + err.error);
+    }
+  }
+
+  async function completeRide(id) {
+    const res = await fetch(`/api/rides/${id}/complete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ driverId }),
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      alert("Could not complete: " + err.error);
+    }
+  }
+</script>
+</body>
+</html>
